@@ -1,0 +1,50 @@
+---
+- name: Initialize the Kubernetes cluster using kubeadm
+  ansible.builtin.command: kubeadm init --apiserver-advertise-address="{{ node_ip }}" --apiserver-cert-extra-sans="{{ node_ip }}" --pod-network-cidr="{{ pod_network_cidr }}"
+
+- name: Create kube directory
+  ansible.builtin.file:
+    path: /home/vagrant/.kube
+    state: directory
+
+- name: Setup kubeconfig for vagrant user
+  ansible.builtin.copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /home/vagrant/.kube/config
+    remote_src: yes
+    owner: vagrant
+    group: vagrant
+    mode: '0600'
+
+- name: Download calico.conf
+  ansible.builtin.get_url:
+    url: https://docs.projectcalico.org/v3.17/manifests/calico.yaml
+    dest: /home/vagrant/calico.yaml
+
+- name: Add pod config to calico.yaml
+  ansible.builtin.lineinfile:
+    dest: /home/vagrant/calico.yaml
+    regexp: '^\s{12}#\s*- name: CALICO_IPV4POOL_CIDR.*$'
+    line: '            - name: CALICO_IPV4POOL_CIDR'
+
+- name: Add pod config to calico.yaml
+  ansible.builtin.lineinfile:
+    dest: /home/vagrant/calico.yaml
+    regexp: '^\s{12}#\s*  value: "192.168.0.0\/16".*$'
+    line: '              value: "172.16.0.0/16"'
+
+- name: Install calico CNI
+  ansible.builtin.command: kubectl create -f calico.yaml
+  become: false
+
+- name: Generate join command
+  ansible.builtin.command: kubeadm token create --print-join-command
+  register: join_command
+
+- name: Remove join-command file if exists
+  local_action: file path=".join-command" state=absent
+  become: false
+
+- name: Copy join command to local file
+  local_action: copy content="{{ join_command.stdout_lines[0] }}" dest="./join-command"
+  become: false

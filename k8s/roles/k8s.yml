@@ -1,0 +1,10 @@
+---
+- hosts: k8s-master
+  become: yes
+  roles:
+    - role: master
+
+- hosts: k8s-worker*
+  become: yes
+  roles:
+    - role: worker

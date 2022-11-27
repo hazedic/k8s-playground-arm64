@@ -1,0 +1,10 @@
+---
+- hosts: hk8s-m
+  become: yes
+  roles:
+    - role: master
+
+- hosts: hk8s-w*
+  become: yes
+  roles:
+    - role: worker

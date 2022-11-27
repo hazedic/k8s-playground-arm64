@@ -1,0 +1,153 @@
+---
+- name: Remove current swaps from /etc/fstab
+  lineinfile:
+    dest: /etc/fstab
+    regexp: '^/[\S]+\s+none\s+swap '
+    state: absent
+
+- name: Disable swap
+  command: swapoff -a
+  when: ansible_swaptotal_mb > 0
+
+- name: Remove swapfile from /etc/fstab
+  ansible.posix.mount:
+    name: "{{ item }}"
+    fstype: swap
+    state: absent
+  with_items:
+    - swap
+    - none
+
+- name: Install required packages
+  ansible.builtin.apt:
+    name: "{{ packages }}"
+    state: present
+    update_cache: yes
+  vars:
+    packages:
+      - ca-certificates
+      - curl
+      - gnupg-agent
+      - software-properties-common
+
+- name: Add an apt signing key for Docker
+  ansible.builtin.apt_key:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    state: present
+
+- name: Add apt repository for Docker
+  ansible.builtin.apt_repository:
+    repo: deb [arch=arm64] https://download.docker.com/linux/ubuntu xenial stable
+    state: present
+
+- name: Add an apt signing key for Kubernetes
+  ansible.builtin.apt_key:
+    url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+    state: present
+
+- name: Adding apt repository for Kubernetes
+  ansible.builtin.apt_repository:
+    repo: deb https://apt.kubernetes.io/ kubernetes-xenial main
+    state: present
+    filename: kubernetes.list
+
+- name: Install packages
+  ansible.builtin.apt:
+    name: "{{ packages }}"
+  vars:
+    packages:
+      - containerd.io
+      - kubelet=1.24.2-00
+      - kubeadm=1.24.2-00
+      - kubectl=1.24.2-00
+
+- name: Just force systemd to reload configs
+  ansible.builtin.systemd:
+    daemon_reload: yes
+
+- name: Enable service containerd and ensure it is not masked
+  ansible.builtin.systemd:
+    name: containerd
+    enabled: yes
+    masked: no
+
+- name: Create containerd config directory
+  ansible.builtin.file:
+    path: /etc/containerd
+    state: directory
+
+- name: Get defaults from containerd
+  ansible.builtin.command: containerd config default
+  register: containerd_config_default
+  changed_when: false
+
+- name: Prepare containerd/config.toml from default config
+  ansible.builtin.copy:
+    dest: /tmp/containerd_config.toml
+    content: "{{ containerd_config_default.stdout }}"
+
+- name: Set Cgroup driver to systemd
+  ansible.builtin.lineinfile:
+    insertafter: '.*\[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options\]$'
+    line: '          SystemdCgroup = true'
+    state: present
+    path: /tmp/containerd_config.toml
+
+- name: Copy config.toml to /etc/containerd
+  ansible.builtin.copy:
+    remote_src: true
+    src: /tmp/containerd_config.toml
+    dest: /etc/containerd/config.toml
+  notify: restart containerd
+
+- name: Cleanup temporary file
+  ansible.builtin.file:
+    path: /tmp/containerd_config.toml
+    state: absent
+
+- name: Create cri config file
+  ansible.builtin.copy:
+    dest: /etc/crictl.yaml
+    content: |
+      runtime-endpoint: "unix:///var/run/containerd/containerd.sock"
+      image-endpoint: ""
+      timeout: 0
+      debug: false
+      pull-image-on-create: false
+      disable-pull-on-run: false
+
+- name: Check sysctl kubernetes file
+  ansible.builtin.stat: path=/etc/sysctl.d/99-kubernetes-cri.conf
+  register: check_sysctl_conf
+
+- name: Write bridge-netfilter and ip-forward system variables
+  when: not check_sysctl_conf.stat.exists
+  ansible.builtin.shell: |
+    cat <<EOF | tee /etc/modules-load.d/containerd.conf
+    overlay
+    br_netfilter
+    EOF
+    modprobe overlay
+    modprobe br_netfilter
+    cat <<EOF | tee /etc/sysctl.d/99-kubernetes-cri.conf
+    net.bridge.bridge-nf-call-iptables  = 1
+    net.ipv4.ip_forward                 = 1
+    net.bridge.bridge-nf-call-ip6tables = 1
+    EOF
+    sysctl --system
+
+- name: Configure node-ip at kubelet
+  ansible.builtin.lineinfile:
+    path: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+    line: Environment="KUBELET_EXTRA_ARGS=--cgroup-driver=systemd --container-runtime=remote --container-runtime-endpoint=unix:///run/containerd/containerd.sock --node-ip={{ node_ip }}"
+    create: yes
+  notify: restart kubelet
+
+- name: Restart service containerd, in all cases
+  ansible.builtin.systemd:
+    name: containerd
+    state: restarted
+    daemon_reload: yes
+
+- name: Restart services if needed
+  ansible.builtin.meta: flush_handlers
