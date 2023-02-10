@@ -1,0 +1,13 @@
+---
+- name: Wait until join-command file is created before continuing
+  local_action: wait_for path="join-command" state=present
+  become: false
+
+- name: Copy the join-command file to server location
+  ansible.builtin.copy:
+    src: "join-command"
+    dest: "/tmp/join-command.sh"
+    mode: "0777"
+
+- name: Join the node to cluster
+  ansible.builtin.command: sh /tmp/join-command.sh

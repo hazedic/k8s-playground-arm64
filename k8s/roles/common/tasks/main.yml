@@ -1,0 +1,132 @@
+---
+- name: Remove current swaps from /etc/fstab
+  ansible.builtin.lineinfile:
+    dest: /etc/fstab
+    regexp: '^/[\S]+\s+none\s+swap '
+    state: absent
+
+- name: Disable swap
+  command: swapoff -a
+  when: ansible_swaptotal_mb > 0
+
+- name: Remove swapfile from /etc/fstab
+  ansible.posix.mount:
+    name: "{{ item }}"
+    fstype: swap
+    state: absent
+  with_items:
+    - swap
+    - none
+
+- name: Install required packages
+  ansible.builtin.apt:
+    pkg:
+      - ca-certificates
+      - curl
+      - gnupg-agent
+      - software-properties-common
+      - python3-pip
+    update_cache: yes
+
+- name: Install Docker public signing key
+  ansible.builtin.shell: |
+    curl -sSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor --yes -o /usr/share/keyrings/docker-archive-keyring.gpg
+
+- name: Add the Docker apt repository
+  ansible.builtin.lineinfile:
+    path: /etc/apt/sources.list.d/docker.list
+    line: deb [arch=arm64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu jammy stable
+    create: yes
+
+- name: Install Google Cloud public signing key
+  ansible.builtin.get_url:
+    url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+    dest: /usr/share/keyrings/kubernetes-archive-keyring.gpg
+    mode: "0644"
+
+- name: Add the Kubernetes apt repository
+  ansible.builtin.lineinfile:
+    path: /etc/apt/sources.list.d/kubernetes.list
+    line: deb [arch=arm64 signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main
+    create: yes
+
+- name: Install packages
+  ansible.builtin.apt:
+    pkg:
+      - containerd.io=1.6.16-1
+      - kubelet=1.26.1-00
+      - kubeadm=1.26.1-00
+      - kubectl=1.26.1-00
+    update_cache: yes
+
+- name: Hold Kubernetes Packages
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  with_items:
+    - kubelet
+    - kubeadm
+    - kubectl
+
+- name: Create containerd config directory
+  ansible.builtin.file:
+    path: /etc/containerd
+    state: directory
+    mode: "0755"
+
+- name: Create containerd config file
+  ansible.builtin.shell: |
+    containerd config default > /etc/containerd/config.toml
+
+- name: Setting crictl endpoint
+  ansible.builtin.shell: |
+    crictl config --set runtime-endpoint=unix:///run/containerd/containerd.sock --set image-endpoint=unix:///run/containerd/containerd.sock
+
+- name: Enable systemd cgroup
+  ansible.builtin.lineinfile:
+    path: /etc/containerd/config.toml
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+    insertafter: "{{ item.insertafter }}"
+  with_items:
+    - regexp: "            SystemdCgroup = false"
+      line: "            SystemdCgroup = true"
+      insertafter: 'plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options'
+  notify:
+    - Restart containerd
+
+- name: Check sysctl kubernetes file
+  ansible.builtin.stat: path=/etc/sysctl.d/99-kubernetes-cri.conf
+  register: check_sysctl_conf
+
+- name: Write bridge-netfilter and ip-forward system variables
+  when: not check_sysctl_conf.stat.exists
+  ansible.builtin.shell: |
+    cat <<EOF | tee /etc/modules-load.d/containerd.conf
+    overlay
+    br_netfilter
+    EOF
+    modprobe overlay
+    modprobe br_netfilter
+    cat <<EOF | tee /etc/sysctl.d/99-kubernetes-cri.conf
+    net.bridge.bridge-nf-call-iptables  = 1
+    net.ipv4.ip_forward                 = 1
+    net.bridge.bridge-nf-call-ip6tables = 1
+    EOF
+    sysctl --system
+
+- name: Configure node-ip at kubelet
+  ansible.builtin.lineinfile:
+    path: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+    line: Environment="KUBELET_KUBEADM_ARGS=--cgroup-driver=systemd --container-runtime=remote --container-runtime-endpoint=unix:///run/containerd/containerd.sock --node-ip={{ node_ip }}"
+    create: yes
+  notify: Restart kubelet
+
+- name: Restart service containerd, in all cases
+  ansible.builtin.systemd:
+    name: containerd
+    state: restarted
+    daemon_reload: yes
+
+- name: Restart services if needed
+  ansible.builtin.meta: flush_handlers

@@ -1,0 +1,74 @@
+- name: Download MetalLB manifest file
+  ansible.builtin.get_url:
+    url: https://raw.githubusercontent.com/metallb/metallb/v0.13.7/config/manifests/metallb-native.yaml
+    dest: /home/vagrant/metallb-native.yaml
+    mode: '0644'
+  become: false
+
+- name: Install MetalLB Load Balancer
+  ansible.builtin.command: kubectl apply -f metallb-native.yaml
+  become: false
+
+- name: Delete metallb-native.yaml file after install
+  ansible.builtin.file:
+    path: /home/vagrant/metallb-native.yaml
+    state: absent
+
+- name: Enable strict ARP mode
+  ansible.builtin.shell: |
+    kubectl get configmap kube-proxy -n kube-system -o yaml | \
+    sed -e "s/strictARP: false/strictARP: true/" | \
+    kubectl apply -f - -n kube-system
+  become: false
+
+- name: Wait for MetalLB pods to be ready
+  become: false
+  ansible.builtin.shell: kubectl wait --for=condition=Ready pod -n metallb-system -l app=metallb
+  register: kubectl_get_nodes
+  retries: 10
+  delay: 10
+  changed_when: false
+  until: kubectl_get_nodes.rc == 0
+
+- name: Create metallb-iprange.yaml file with content
+  ansible.builtin.copy:
+    dest: /home/vagrant/metallb-iprange.yaml
+    content: |
+      apiVersion: metallb.io/v1beta1
+      kind: IPAddressPool
+      metadata:
+        name: k8s-svc-pool
+        namespace: metallb-system
+      spec:
+        addresses:
+        - 192.168.56.20-192.168.56.40
+  become: false
+
+- name: Apply MetalLB address pools configuration
+  ansible.builtin.command: kubectl apply -f metallb-iprange.yaml
+  become: false
+
+- name: Delete metallb-iprange.yaml file after apply
+  ansible.builtin.file:
+    path: /home/vagrant/metallb-iprange.yaml
+    state: absent
+
+- name: Create metallb-l2mode.yaml file with content
+  ansible.builtin.copy:
+    dest: /home/vagrant/metallb-l2mode.yaml
+    content: |
+      apiVersion: metallb.io/v1beta1
+      kind: L2Advertisement
+      metadata:
+        name: layer2-mode
+        namespace: metallb-system
+  become: false
+
+- name: Apply MetalLB advanced L2 configuration
+  ansible.builtin.command: kubectl apply -f metallb-l2mode.yaml
+  become: false
+
+- name: Delete metallb-l2mode.yaml file after apply
+  ansible.builtin.file:
+    path: /home/vagrant/metallb-l2mode.yaml
+    state: absent

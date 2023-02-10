@@ -1,0 +1,12 @@
+- hosts: hk8s-m
+  become: true
+  roles:
+    - { role: master }
+  post_tasks:
+    - ansible.builtin.include_tasks:
+        file: tasks/metallb.yml
+
+- hosts: hk8s-w*
+  become: true
+  roles:
+    - { role: worker }

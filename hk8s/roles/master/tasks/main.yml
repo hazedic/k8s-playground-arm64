@@ -1,0 +1,63 @@
+---
+- name: Initialize the Kubernetes cluster using kubeadm
+  ansible.builtin.command: kubeadm init --apiserver-advertise-address="{{ node_ip }}" --apiserver-cert-extra-sans="{{ node_ip }}" --pod-network-cidr="{{ pod_network_cidr }}" --cri-socket=unix:///run/containerd/containerd.sock --v=5
+
+- name: Create kube directory
+  ansible.builtin.file:
+    path: /home/vagrant/.kube
+    state: directory
+
+- name: Setup kubeconfig for vagrant user
+  ansible.builtin.copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /home/vagrant/.kube/config
+    remote_src: yes
+    owner: vagrant
+    group: vagrant
+    mode: "0600"
+
+- name: Install the Tigera Calico operator
+  ansible.builtin.command: kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.25.0/manifests/tigera-operator.yaml
+  become: false
+
+- name: Download the custom resources necessary to configure Calico
+  ansible.builtin.get_url:
+    url: https://raw.githubusercontent.com/projectcalico/calico/v3.25.0/manifests/custom-resources.yaml
+    dest: /home/vagrant/custom-resources.yaml
+  become: false
+
+- name: Add pod config to custom-resources.yaml
+  ansible.builtin.lineinfile:
+    dest: /home/vagrant/custom-resources.yaml
+    regexp: '^\s{6}\s*cidr: 192.168.0.0\/16.*$'
+    line: '      cidr: 172.16.0.0/16'
+
+- name: Install Calico by creating the necessary custom resource
+  ansible.builtin.command: kubectl create -f custom-resources.yaml
+  become: false
+
+- name: Remove manifest file after install custom resource
+  ansible.builtin.file:
+    path: /home/vagrant/custom-resources.yaml
+    state: absent
+
+- name: Generate join command
+  ansible.builtin.command: kubeadm token create --print-join-command
+  register: join_command
+
+- name: Remove join-command file if exists
+  local_action: file path="join-command" state=absent
+  become: false
+
+- name: Copy join command to local file
+  local_action: copy content="{{ join_command.stdout_lines[0] }}--v=5" dest="./join-command"
+  become: false
+
+- name: Wait for worker nodes to be ready
+  become: false
+  ansible.builtin.shell: kubectl wait --for=condition=Ready nodes --all
+  register: kubectl_get_nodes
+  retries: 10
+  delay: 10
+  changed_when: false
+  until: kubectl_get_nodes.rc == 0

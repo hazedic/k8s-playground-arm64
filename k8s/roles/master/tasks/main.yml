@@ -1,0 +1,54 @@
+---
+- name: Initialize the Kubernetes cluster using kubeadm
+  ansible.builtin.command: |
+    kubeadm init --apiserver-advertise-address="{{ node_ip }}" --apiserver-cert-extra-sans="{{ node_ip }}" --pod-network-cidr="{{ pod_network_cidr }}" --cri-socket=unix:///run/containerd/containerd.sock --v=5
+
+- name: Create kube directory
+  ansible.builtin.file:
+    path: /home/vagrant/.kube
+    state: directory
+
+- name: Setup kubeconfig for vagrant user
+  ansible.builtin.copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /home/vagrant/.kube/config
+    remote_src: yes
+    owner: vagrant
+    group: vagrant
+    mode: "0600"
+
+- name: Download kube-flannel.yml
+  ansible.builtin.get_url:
+    url: https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+    dest: /home/vagrant/kube-flannel.yml
+  become: false
+
+- name: Install flannel CNI
+  ansible.builtin.command: kubectl create -f kube-flannel.yml
+  become: false
+
+- name: Delete kube-flannel.yml file after install
+  ansible.builtin.file:
+    path: /home/vagrant/kube-flannel.yml
+    state: absent
+
+- name: Generate join command
+  ansible.builtin.command: kubeadm token create --print-join-command
+  register: join_command
+
+- name: Remove join-command file if exists
+  local_action: file path="join-command" state=absent
+  become: false
+
+- name: Copy join command to local file
+  local_action: copy content="{{ join_command.stdout_lines[0] }}--v=5" dest="./join-command"
+  become: false
+
+- name: Wait for worker nodes to be ready
+  become: false
+  ansible.builtin.shell: kubectl wait --for=condition=Ready nodes --all
+  register: kubectl_get_nodes
+  retries: 10
+  delay: 10
+  changed_when: false
+  until: kubectl_get_nodes.rc == 0

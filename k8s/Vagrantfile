@@ -1,0 +1,57 @@
+BOX_IMAGE = "bento/ubuntu-22.04-arm64"
+BOX_VERSION = "202301.20.0"
+
+N = 3
+
+Vagrant.configure("2") do |config|
+    config.ssh.insert_key = false
+
+    config.vm.define "k8s-master" do |master|
+        master.vm.box = BOX_IMAGE
+        master.vm.box_version = BOX_VERSION
+        master.vm.network "private_network", ip: "192.168.56.10"
+        master.vm.hostname = "k8s-master"
+        master.vm.provider "parallels" do |v|
+          v.cpus = 2
+          v.memory = 2048
+          v.linked_clone = true
+        end
+        master.vm.provision "ansible" do |ansible|
+          ansible.playbook = "playbook.yml"
+          ansible.extra_vars = {
+              ansible_python_interpreter: "/usr/bin/python3",
+              node_ip: "192.168.56.10"
+          }
+        end
+        master.vm.provision "shell", inline: <<-EOC
+cat <<-'EOF' >>/home/vagrant/.bashrc
+alias k=kubectl
+source <(kubectl completion bash)
+complete -F __start_kubectl k
+EOF
+sudo apt-get update
+sudo apt-get install -y bash-completion 2>/dev/null
+        EOC
+    end
+
+    (1..N).each do |i|
+        config.vm.define "k8s-worker#{i}" do |worker|
+            worker.vm.box = BOX_IMAGE
+            worker.vm.box_version = BOX_VERSION
+            worker.vm.network "private_network", ip: "192.168.56.#{i + 10}"
+            worker.vm.hostname = "k8s-worker#{i}"
+            worker.vm.provider "parallels" do |v|
+              v.cpus = 2
+              v.memory = 2048
+              v.linked_clone = true
+            end
+            worker.vm.provision "ansible" do |ansible|
+                ansible.playbook = "playbook.yml"
+                ansible.extra_vars = {
+                    ansible_python_interpreter: "/usr/bin/python3",
+                    node_ip: "192.168.56.#{i + 10}"
+                }
+            end
+        end
+    end
+end
